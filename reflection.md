@@ -5,7 +5,27 @@
 **a. Initial design**
 
 - Briefly describe your initial UML design.
+    - the UML diagram provides a full system flow detailing owner, pet, pet activities, datetime objects, and schedule objects for tracking pet activities.
 - What classes did you include, and what responsibilities did you assign to each?
+    - I included 17 classes:
+        -- TimeOfDay: keep track of time of last activity type
+        -- DayOfWeek: keep track of day of last activity type
+        -- Priority: priority flag of activity
+        -- Category: category of activity
+        -- Enrichment: object for enrichment
+        -- EnrichmentType: type of enrichment activity(puzzle, toys, training, social)
+        -- OwnerPreference: preferred walking and feeding time for petp
+        -- Owner: data profile of owner
+        -- Pet: data profile of pet 
+        -- Task: task object
+        -- WalkSchedule: distance, duration, time of day, day of week, counter of walks given
+        -- Feeding: weight of food, date, time of day, counter of feeding
+        -- GroomingRecord: groom log
+        -- MedicationRecord: medication log(med name, last med datetime, dosage)
+        -- AffectionRecord: affection counter, last affection given
+        -- SceduledItem: handles overall pending items
+        -- DailyPlan: daily pending items provided by scheduled item
+        -- Scheduler: scheduling object
 
 **b. Design changes**
 
