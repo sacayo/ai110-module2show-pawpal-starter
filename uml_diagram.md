@@ -112,15 +112,16 @@ classDiagram
     class MedicationRecord {
         -med_name: str
         -meds_administered: int
-        -last_med_datetime: datetime
+        -last_med_datetime: datetime | None
         -dosage_interval_hours: int
+        +is_dose_due() bool
         +administer_med() None
-        +to_task() Task
+        +to_task() Task | None
     }
 
     class AffectionRecord {
         -affection_counter: int
-        -last_affection_datetime: datetime
+        -last_affection_datetime: datetime | None
         +give_affection() None
         +to_task() Task
     }

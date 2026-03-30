@@ -30,7 +30,34 @@
 **b. Design changes**
 
 - Did your design change during implementation?
+    yes, there were a few relationship that failed to be converted into code. for instance, 
+        - owner <-> was not linked in code
+        - pet <-> was not linked in code
+        - medication scheduling ignored dose interval
+        - pet data was unused by scheduler
 - If yes, describe at least one change and why you made it.
+    here are the list of fixes.
+        fix 1: owner <-> pet relationship
+        -- Add pets: list[Pet] to Owner. Add owner: Owner parameter back to Pet.__init__. When a Pet is created with an owner, it
+            auto-registers itself into owner.pets. Update to_dict() on both.
+        fix 2: pet <-> care record relationship
+        -- Add attributes to Pet:
+            - walk_schedules: list[WalkSchedule]
+            - feedings: list[Feeding]
+            - grooming: GroomingRecord | None
+            - medication: MedicationRecord | None
+            - affection: AffectionRecord | None
+            - enrichments: list[Enrichment]
+        fix 3: medictation dse interval
+            -- Add an is_dose_due() method that checks if last_med_datetime is None (never dosed) or if enough hours have elapsed
+            since the last dose. Update to_task() to return None when no dose is due, and update the return type to Task | None.
+            Callers must handle the None case.
+        fix 4: scheduler doesn't use pet data
+        -- self.pet is stored but never read. A senior dog and a kitten get identical plans.
+            - If pet.age_months < 12 (puppy/kitten): increase walk frequency importance, reduce walk duration
+            - If pet.age_months > 96 (senior, ~8+ years): reduce walk duration, increase medication priority
+            - Include pet name and species in the explanation string
+ Why: Without this, there's no way to ask "which pets does this owner have?" — the core domain relationship is missing.
 
 ---
 
