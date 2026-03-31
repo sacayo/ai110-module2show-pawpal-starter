@@ -66,13 +66,18 @@
 **a. Constraints and priorities**
 
 - What constraints does your scheduler consider (for example: time, priority, preferences)?
+    -- there is a total minutes the owner can spend and only keeps tasks whose combined duration fit this budget
+    -- time of day buckets is used for perferred time
+
 - How did you decide which constraints mattered most?
+    -- I queried the AI assistant to help me reason about the most impactful tradeoffs
 
 **b. Tradeoffs**
 
 - Describe one tradeoff your scheduler makes.
+    -- the scheduler sorts by priority and takes into consideration of priority order (with category tie-breaks from owner preference), and anything that doesn't fit in a owner's available times is dropped.
 - Why is that tradeoff reasonable for this scenario?
-
+    -- the tradeoff make sense because the app is meant to help owner prioritize daily task for pet managment. Use a priority order is essiental, although the way the app dropped other item is not optimized.
 ---
 
 ## 3. AI Collaboration
@@ -94,6 +99,7 @@
 **a. What you tested**
 
 - What behaviors did you test?
+    -- I test both positive and negative cases of how the algorithm works along with how the data objects works when a user creates a task
 - Why were these tests important?
 
 **b. Confidence**

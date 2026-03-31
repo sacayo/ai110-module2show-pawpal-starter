@@ -14,12 +14,16 @@ from datetime import datetime, date, time, timedelta
 # ─────────────────────────────────────────────
 
 class TimeOfDay(Enum):
+    """Broad part of the day used to bucket tasks and map to clock times in scheduling."""
+
     MORNING = "morning"
     EVENING = "evening"
     NIGHT = "night"
 
 
 class DayOfWeek(Enum):
+    """Calendar weekday for weekly recurring care (e.g. walk days)."""
+
     MONDAY = "monday"
     TUESDAY = "tuesday"
     WEDNESDAY = "wednesday"
@@ -30,6 +34,8 @@ class DayOfWeek(Enum):
 
 
 class Priority(Enum):
+    """Relative urgency of a task; drives ordering when building the daily plan."""
+
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
@@ -41,6 +47,8 @@ class Priority(Enum):
 
 
 class Category(Enum):
+    """Kind of pet care activity; used for grouping and owner preference ordering."""
+
     WALK = "walk"
     FEEDING = "feeding"
     GROOMING = "grooming"
@@ -51,6 +59,8 @@ class Category(Enum):
 
 
 class EnrichmentType(Enum):
+    """Subtype of mental or physical enrichment (toys, training, social play, etc.)."""
+
     PUZZLE = "puzzle"
     TOY = "toy"
     TRAINING = "training"
@@ -86,6 +96,7 @@ class Task:
         category: Category = Category.CUSTOM,
         preferred_time: TimeOfDay | None = None,
         frequency: str = "daily",
+        scheduled_day: DayOfWeek | None = None,
     ):
         """Initialize a task, validating frequency against allowed values."""
         if frequency not in self.VALID_FREQUENCIES:
@@ -96,13 +107,37 @@ class Task:
         self.category = category
         self.preferred_time = preferred_time
         self.frequency = frequency
+        self.scheduled_day: DayOfWeek | None = scheduled_day
+        self.due_date: date | None = None
+        self.next_due_date: date | None = None
         self.completed: bool = False
         self.last_completed: datetime | None = None
 
     def mark_complete(self) -> None:
-        """Mark this task as done and record when it was completed."""
+        """Mark this task as done, record timestamp, and calculate next due date."""
         self.completed = True
         self.last_completed = datetime.now()
+        if self.frequency == "daily":
+            self.next_due_date = date.today() + timedelta(days=1)
+        elif self.frequency == "weekly":
+            self.next_due_date = date.today() + timedelta(weeks=1)
+        else:
+            self.next_due_date = None
+
+    def generate_next_occurrence(self) -> Task | None:
+        """
+        For daily/weekly tasks, create a fresh Task instance due on next_due_date.
+        Returns None for 'once' or 'as_needed' tasks.
+        """
+        if self.frequency not in ("daily", "weekly") or self.next_due_date is None:
+            return None
+        next_task = Task(
+            self.title, self.duration_minutes, self.priority,
+            self.category, self.preferred_time, self.frequency,
+            self.scheduled_day,
+        )
+        next_task.due_date = self.next_due_date
+        return next_task
 
     def reset(self) -> None:
         """Clear completion status — called at the start of a new day."""
@@ -119,15 +154,37 @@ class Task:
         - "as_needed" → never auto-scheduled; owner triggers manually.
         """
         if self.frequency == "daily":
-            return True
+            return self.due_date is None or self.due_date <= date.today()
         if self.frequency == "weekly":
-            # Without a day argument, include it (scheduler can filter later)
-            return True
+            if self.due_date is not None and self.due_date > date.today():
+                return False
+            if self.scheduled_day is None:
+                return True
+            weekday_map = {
+                0: DayOfWeek.MONDAY, 1: DayOfWeek.TUESDAY, 2: DayOfWeek.WEDNESDAY,
+                3: DayOfWeek.THURSDAY, 4: DayOfWeek.FRIDAY,
+                5: DayOfWeek.SATURDAY, 6: DayOfWeek.SUNDAY,
+            }
+            return weekday_map[date.today().weekday()] == self.scheduled_day
         if self.frequency == "once":
             return not self.completed
         if self.frequency == "as_needed":
             return False
         return True
+
+    def is_overdue(self) -> bool:
+        """
+        True if this task was due but not completed on time.
+        - Daily: completed before today, or due_date is in the past and not yet done.
+        - Weekly: due_date is in the past and not yet done.
+        """
+        if self.completed:
+            return False
+        if self.due_date is not None and self.due_date < date.today():
+            return True
+        if self.frequency == "daily" and self.last_completed is not None:
+            return self.last_completed.date() < date.today()
+        return False
 
     def to_dict(self) -> dict:
         """Serialize the task to a plain dictionary including completion state."""
@@ -138,6 +195,9 @@ class Task:
             "category": self.category.value,
             "preferred_time": self.preferred_time.value if self.preferred_time else None,
             "frequency": self.frequency,
+            "scheduled_day": self.scheduled_day.value if self.scheduled_day else None,
+            "due_date": self.due_date.isoformat() if self.due_date else None,
+            "next_due_date": self.next_due_date.isoformat() if self.next_due_date else None,
             "completed": self.completed,
             "last_completed": self.last_completed.isoformat() if self.last_completed else None,
         }
@@ -148,6 +208,8 @@ class Task:
 # ─────────────────────────────────────────────
 
 class OwnerPreferences:
+    """Owner-specific defaults for walk/feed timing and category priority when scheduling."""
+
     def __init__(
         self,
         preferred_walk_time: TimeOfDay = TimeOfDay.MORNING,
@@ -303,11 +365,15 @@ class Pet:
     def complete_task(self, title: str) -> bool:
         """
         Mark the first task (care record or custom) with this title as complete.
+        For daily/weekly tasks, auto-generates the next occurrence and queues it.
         Returns True if found.
         """
         for task in self.collect_tasks(filter_due=False):
-            if task.title.lower() == title.lower():
+            if task.title.lower() == title.lower() and not task.completed:
                 task.mark_complete()
+                next_task = task.generate_next_occurrence()
+                if next_task:
+                    self.custom_tasks.append(next_task)
                 return True
         return False
 
@@ -364,6 +430,8 @@ class Pet:
 # ─────────────────────────────────────────────
 
 class WalkSchedule:
+    """Recurring walk plan for a pet (distance, duration, weekday, time-of-day)."""
+
     def __init__(
         self,
         pet: Pet,
@@ -392,11 +460,14 @@ class WalkSchedule:
             priority=Priority.HIGH,
             category=Category.WALK,
             preferred_time=self.time_of_day,
-            frequency="daily",
+            frequency="weekly",
+            scheduled_day=self.day_of_week,
         )
 
 
 class Feeding:
+    """A feeding regimen entry: portion size, planned date, and preferred time of day."""
+
     def __init__(
         self,
         pet: Pet,
@@ -428,6 +499,8 @@ class Feeding:
 
 
 class GroomingRecord:
+    """Tracks grooming sessions over time and yields a weekly grooming task."""
+
     def __init__(self, pet: Pet, time_of_day: TimeOfDay = TimeOfDay.MORNING):
         """Create a grooming tracker and register it with the pet."""
         self.groom_log: list[tuple[datetime, str]] = []
@@ -457,6 +530,8 @@ class GroomingRecord:
 
 
 class MedicationRecord:
+    """Medication schedule with interval-based dose due checks."""
+
     def __init__(self, pet: Pet, med_name: str, dosage_interval_hours: int):
         """Create a medication tracker and register it with the pet."""
         self.med_name = med_name
@@ -490,6 +565,8 @@ class MedicationRecord:
 
 
 class AffectionRecord:
+    """Simple counter and timestamp log for affection/play interactions with a pet."""
+
     def __init__(self, pet: Pet):
         """Create an affection tracker and register it with the pet."""
         self.affection_counter: int = 0
@@ -513,6 +590,8 @@ class AffectionRecord:
 
 
 class Enrichment:
+    """Structured enrichment activity (type, duration, time preference) for a pet."""
+
     def __init__(
         self,
         pet: Pet,
@@ -556,11 +635,21 @@ BUCKET_END_MINUTES = {
 
 
 class ScheduledItem:
-    def __init__(self, task: Task, start_time: time, reason: str):
+    """One placement on the plan: a task, concrete start time, rationale, and optional pet name."""
+
+    def __init__(self, task: Task, start_time: time, reason: str, pet_name: str = ""):
         """Wrap a Task with its assigned start time and scheduling reason."""
         self.task = task
         self.start_time = start_time
         self.reason = reason
+        self.pet_name = pet_name
+
+    @property
+    def end_time(self) -> time:
+        """Compute end time from start_time + task duration, clamped to 23:59."""
+        total_minutes = self.start_time.hour * 60 + self.start_time.minute + self.task.duration_minutes
+        total_minutes = min(total_minutes, 23 * 60 + 59)
+        return time(total_minutes // 60, total_minutes % 60)
 
     def to_dict(self) -> dict:
         """Serialize this scheduled item to a plain dictionary for display."""
@@ -575,6 +664,8 @@ class ScheduledItem:
 
 
 class DailyPlan:
+    """Complete ordered schedule for a day: items, total minutes used, and human-readable explanation."""
+
     def __init__(
         self,
         items: list[ScheduledItem],
@@ -630,9 +721,102 @@ class Scheduler:
 
     # ── Multi-pet interface ───────────────────────────────────────────────────
 
+    def generate_global_plan(self) -> tuple[dict[str, DailyPlan], list[Task]]:
+        """
+        Generate plans for all pets sharing a single time budget.
+        Returns (per-pet plans dict, globally dropped tasks list).
+        """
+        # Collect and pre-process tasks from every pet, tracking origin
+        task_pet_map: dict[int, Pet] = {}
+        all_tasks: list[Task] = []
+        for pet in self.all_pets:
+            pet_tasks = [t for t in pet.collect_tasks() if not t.completed]
+            adjusted = self._adjust_for_pet(pet_tasks, pet)
+            boosted = self._boost_overdue(adjusted)
+            preffed = self._apply_owner_preferences(boosted)
+            for task in preffed:
+                task_pet_map[id(task)] = pet
+                all_tasks.append(task)
+
+        # Sort and fit to SHARED budget
+        sorted_tasks = self._sort_by_priority(all_tasks)
+        fitted, dropped = self._fit_to_time(sorted_tasks, self.owner.available_minutes)
+
+        # Group results back by pet
+        pet_fitted: dict[str, list[Task]] = {p.name: [] for p in self.all_pets}
+        pet_dropped: dict[str, list[Task]] = {p.name: [] for p in self.all_pets}
+        for task in fitted:
+            pet_fitted[task_pet_map[id(task)].name].append(task)
+        for task in dropped:
+            pet_dropped[task_pet_map[id(task)].name].append(task)
+
+        # Build per-pet DailyPlans
+        used_total = sum(t.duration_minutes for t in fitted)
+        plans: dict[str, DailyPlan] = {}
+        for pet in self.all_pets:
+            items = self._assign_times(pet_fitted[pet.name])
+            for item in items:
+                item.pet_name = pet.name
+            explanation = self._build_explanation(
+                pet_fitted[pet.name], pet_dropped[pet.name], pet,
+                global_note=f"Global budget: {used_total} of {self.owner.available_minutes} min used across {len(self.all_pets)} pet(s).",
+            )
+            total = sum(t.duration_minutes for t in pet_fitted[pet.name])
+            plans[pet.name] = DailyPlan(items=items, total_minutes=total, explanation=explanation)
+
+        plans, conflicts = self.detect_and_resolve_conflicts(plans)
+        if conflicts:
+            for pet_name_key, plan in plans.items():
+                plan.explanation += "\n" + "\n".join(
+                    f"  [Conflict resolved] {c}" for c in conflicts if pet_name_key in c
+                )
+
+        return plans, dropped
+
     def generate_all_plans(self) -> dict[str, DailyPlan]:
-        """Generate one DailyPlan per pet, keyed by pet name."""
-        return {pet.name: self.generate_plan_for_pet(pet) for pet in self.all_pets}
+        """Generate one DailyPlan per pet sharing the owner's time budget."""
+        plans, _ = self.generate_global_plan()
+        return plans
+
+    def detect_and_resolve_conflicts(
+        self, plans: dict[str, DailyPlan]
+    ) -> tuple[dict[str, DailyPlan], list[str]]:
+        """
+        Merge all ScheduledItems across pets, detect overlaps, shift later items.
+        Returns updated plans and a list of human-readable conflict descriptions.
+        """
+        # Flatten all items preserving pet labels
+        all_items: list[ScheduledItem] = [
+            item for plan in plans.values() for item in plan.items
+        ]
+        # Sort by start time using the same HH:MM lambda
+        all_items.sort(key=lambda item: item.start_time.strftime("%H:%M"))
+
+        conflicts: list[str] = []
+        for i in range(1, len(all_items)):
+            prev = all_items[i - 1]
+            curr = all_items[i]
+            prev_end_min = prev.end_time.hour * 60 + prev.end_time.minute
+            curr_start_min = curr.start_time.hour * 60 + curr.start_time.minute
+            if prev_end_min > curr_start_min:
+                new_start = min(prev_end_min, 23 * 60 + 59)
+                old_str = curr.start_time.strftime("%H:%M")
+                curr.start_time = time(new_start // 60, new_start % 60)
+                if prev.pet_name == curr.pet_name:
+                    msg = (
+                        f"WARNING: {curr.task.title} ({curr.pet_name}) shifted from {old_str} "
+                        f"to {curr.start_time.strftime('%H:%M')} — overlap with "
+                        f"{prev.task.title} (same pet)"
+                    )
+                else:
+                    msg = (
+                        f"{curr.task.title} ({curr.pet_name}) shifted from {old_str} "
+                        f"to {curr.start_time.strftime('%H:%M')} — overlap with "
+                        f"{prev.task.title} ({prev.pet_name})"
+                    )
+                conflicts.append(msg)
+
+        return plans, conflicts
 
     def get_next_task(self) -> Task | None:
         """
@@ -669,7 +853,8 @@ class Scheduler:
         """Generate a DailyPlan scoped to one pet's pending tasks."""
         pet_tasks = [t for t in pet.collect_tasks() if not t.completed]
         adjusted = self._adjust_for_pet(pet_tasks, pet)
-        preffed = self._apply_owner_preferences(adjusted)
+        boosted = self._boost_overdue(adjusted)
+        preffed = self._apply_owner_preferences(boosted)
         sorted_tasks = self._sort_by_priority(preffed)
         fitted, dropped = self._fit_to_time(sorted_tasks, self.owner.available_minutes)
         scheduled_items = self._assign_times(fitted)
@@ -688,12 +873,34 @@ class Scheduler:
                 cap = 20 if age < 12 else 25 if age > 96 else None
                 if cap:
                     task = Task(task.title, min(task.duration_minutes, cap),
-                                task.priority, task.category, task.preferred_time, task.frequency)
+                                task.priority, task.category, task.preferred_time, task.frequency,
+                                task.scheduled_day)
             elif task.category == Category.MEDICATION and age > 96:
                 task = Task(task.title, task.duration_minutes, Priority.HIGH,
-                            task.category, task.preferred_time, task.frequency)
+                            task.category, task.preferred_time, task.frequency,
+                            task.scheduled_day)
             adjusted.append(task)
         return adjusted
+
+    # ── Overdue priority boost ─────────────────────────────────────────────────
+
+    def _boost_overdue(self, tasks: list[Task]) -> list[Task]:
+        """Promote overdue tasks one priority level: LOW→MEDIUM, MEDIUM→HIGH."""
+        boost_map = {Priority.LOW: Priority.MEDIUM, Priority.MEDIUM: Priority.HIGH}
+        result = []
+        for task in tasks:
+            if task.is_overdue() and task.priority in boost_map:
+                boosted = Task(
+                    task.title, task.duration_minutes, boost_map[task.priority],
+                    task.category, task.preferred_time, task.frequency,
+                    task.scheduled_day,
+                )
+                boosted.due_date = task.due_date
+                boosted.last_completed = task.last_completed
+                result.append(boosted)
+            else:
+                result.append(task)
+        return result
 
     # ── Owner preference application ──────────────────────────────────────────
 
@@ -710,7 +917,8 @@ class Scheduler:
                 )
                 if preferred:
                     task = Task(task.title, task.duration_minutes, task.priority,
-                                task.category, preferred, task.frequency)
+                                task.category, preferred, task.frequency,
+                                task.scheduled_day)
             result.append(task)
         return result
 
@@ -748,6 +956,10 @@ class Scheduler:
 
         return fitted, still_dropped
 
+    def sort_by_time(self, items: list[ScheduledItem]) -> list[ScheduledItem]:
+        """Sort scheduled items chronologically using start_time as a HH:MM string key."""
+        return sorted(items, key=lambda item: item.start_time.strftime("%H:%M"))
+
     def _assign_times(self, tasks: list[Task]) -> list[ScheduledItem]:
         """Assign clock times to tasks, clamped to prevent midnight overflow."""
         buckets: dict[TimeOfDay, list[Task]] = {
@@ -769,7 +981,7 @@ class Scheduler:
                 items.append(ScheduledItem(task, start, self._build_item_reason(task, time_of_day)))
                 next_minutes = current_minutes + task.duration_minutes
                 current_minutes = min(next_minutes, end_boundary)
-        return items
+        return self.sort_by_time(items)
 
     def _build_item_reason(self, task: Task, slot: TimeOfDay) -> str:
         """Build a human-readable reason string for why a task landed in a given slot."""
@@ -781,7 +993,8 @@ class Scheduler:
         return f"{task.priority.value.capitalize()} priority — {placement}"
 
     def _build_explanation(
-        self, fitted: list[Task], dropped: list[Task], pet: Pet
+        self, fitted: list[Task], dropped: list[Task], pet: Pet,
+        global_note: str = "",
     ) -> str:
         """Compose the full plain-text explanation shown at the top of each daily plan."""
         used_min = sum(t.duration_minutes for t in fitted)
@@ -798,11 +1011,65 @@ class Scheduler:
             f"Plan for {pet.name} ({pet.species}, {pet.age_months} months) — owner: {self.owner.name}.{age_note}",
             f"Scheduled {len(fitted)} of {total} tasks using {used_min} of {budget} available minutes.",
         ]
+        if global_note:
+            lines.append(global_note)
         for task in fitted:
             status = "✓" if task.completed else "○"
-            lines.append(f"  {status} {task.title} ({task.priority.value}, {task.duration_minutes}min, {task.frequency})")
+            overdue_label = " [OVERDUE]" if task.is_overdue() else ""
+            lines.append(f"  {status} {task.title}{overdue_label} ({task.priority.value}, {task.duration_minutes}min, {task.frequency})")
         if dropped:
             lines.append(f"Dropped due to time constraints: {', '.join(t.title for t in dropped)}.")
         if not fitted:
             lines.append("Nothing to schedule — all tasks are complete or no tasks are due.")
         return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────
+# Composable Filters
+# ─────────────────────────────────────────────
+
+def by_pet(name: str):
+    """Filter predicate: ScheduledItems belonging to a specific pet."""
+    def _f(item: ScheduledItem) -> bool:
+        return item.pet_name.lower() == name.lower()
+    return _f
+
+
+def by_category(cat: Category):
+    """Filter predicate: ScheduledItems of a specific care category."""
+    def _f(item: ScheduledItem) -> bool:
+        return item.task.category == cat
+    return _f
+
+
+def by_time_bucket(tod: TimeOfDay):
+    """Filter predicate: ScheduledItems whose start_time falls in the given bucket."""
+    bucket_ranges = {
+        TimeOfDay.MORNING: (0, 720),
+        TimeOfDay.EVENING: (720, 1080),
+        TimeOfDay.NIGHT: (1080, 1440),
+    }
+    def _f(item: ScheduledItem) -> bool:
+        start_min = item.start_time.hour * 60 + item.start_time.minute
+        lo, hi = bucket_ranges[tod]
+        return lo <= start_min < hi
+    return _f
+
+
+def by_status(status: str):
+    """
+    Filter predicate by task status.
+    status: 'pending' | 'complete' | 'overdue'
+    """
+    def _f(item: ScheduledItem) -> bool:
+        if status == "complete":
+            return item.task.completed
+        if status == "overdue":
+            return item.task.is_overdue()
+        return not item.task.completed  # pending
+    return _f
+
+
+def apply_filters(items: list[ScheduledItem], filters: list) -> list[ScheduledItem]:
+    """Return items matching ALL provided filter predicates."""
+    return [item for item in items if all(f(item) for f in filters)]
