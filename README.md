@@ -52,3 +52,30 @@ pip install -r requirements.txt
 5. Add tests to verify key behaviors.
 6. Connect your logic to the Streamlit UI in `app.py`.
 7. Refine UML so it matches what you actually built.
+
+## Testing PawPal+
+
+The test suite lives in `tests/test_pawpal.py` and contains **45 tests** across 12 categories. Run the full suite with:
+
+```bash
+pytest tests/test_pawpal.py -v
+# or, if using uv:
+uv run pytest tests/test_pawpal.py -v
+```
+
+| Step | Category | Tests | What it covers |
+|------|----------|-------|----------------|
+| 1 | Task Completion | 1 | `mark_complete()` flips status and records a timestamp |
+| 2 | Task Addition | 1 | `Pet.add_task()` increases the pending task count |
+| 3 | Weekly Recurrence Fix | 3 | `scheduled_day` gating; backward-compat "always due"; `WalkSchedule.to_task()` |
+| 4 | Recurring Task Auto-Generation | 5 | `next_due_date` after completion; `generate_next_occurrence`; `Pet.complete_task` list mutation; next occurrence suppressed until future `due_date` |
+| 5 | Overdue Detection + Priority Boost | 6 | `is_overdue()` for daily/past-due tasks; `_boost_overdue` LOW→MEDIUM→HIGH; HIGH stays HIGH |
+| 6 | Time-Aware Sorting | 1 | `sort_by_time()` returns items in chronological order |
+| 7 | Global Time-Budget Fitting | 3 | Shared budget ceiling across pets; both pets appear in output; `generate_all_plans` return shape |
+| 8 | Cross-Pet Conflict Detection | 2 | Cross-pet and same-pet overlap detection, shift, and warning messages |
+| 9 | Composable Filtering | 4 | `by_pet`, `by_status` (pending/overdue), `by_category`, combined filter intersection |
+| 10 | Priority-Driven Dropping & `_fit_to_time` | 5 | High-priority task survives tight budget; explicit dropped list; two-pass backfill; category tie-break; `generate_global_plan` dropped return value |
+| 11 | Frequency Corner Cases | 5 | `as_needed` never due; `once` due before and not-due after completion; weekly future `due_date` suppressed; invalid frequency raises `ValueError` |
+| 12 | Age Adjustments & `get_next_task` | 6 | Puppy/senior walk duration caps; senior medication priority escalation; `get_next_task` returns highest priority and skips completed tasks; `by_time_bucket` filter |
+
+Together these categories validate the core scheduling contract: **correct priority-driven ordering**, **recurring task lifecycle** (create → complete → regenerate → suppress), **cross-pet conflict resolution**, and **boundary/edge-case behavior** for frequencies, budgets, and age rules.

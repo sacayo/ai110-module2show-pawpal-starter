@@ -400,3 +400,217 @@ def test_combined_filters():
     assert len(result) == 1
     assert result[0].task.title == "Feed"
     assert result[0].pet_name == "Mochi"
+
+
+# ── Step 8: Priority-Driven Dropping and _fit_to_time ────────────────────────
+
+def test_high_priority_task_survives_tight_budget():
+    """When budget is tight, high-priority tasks should stay and low-priority ones be dropped."""
+    owner = make_owner(minutes=40)
+    pet = make_pet(owner)
+    scheduler = Scheduler.for_owner(owner)
+
+    high = Task("Meds",    30, Priority.HIGH,   Category.MEDICATION, frequency="daily")
+    low  = Task("Cuddle",  20, Priority.LOW,    Category.AFFECTION,  frequency="daily")
+
+    sorted_tasks = scheduler._sort_by_priority([low, high])
+    fitted, dropped = scheduler._fit_to_time(sorted_tasks, owner.available_minutes)
+
+    fitted_titles = [t.title for t in fitted]
+    dropped_titles = [t.title for t in dropped]
+
+    assert "Meds"   in fitted_titles
+    assert "Cuddle" in dropped_titles
+
+
+def test_dropped_list_is_populated_when_budget_exceeded():
+    """_fit_to_time must return the tasks that did not fit in the dropped list."""
+    owner = make_owner(minutes=30)
+    pet = make_pet(owner)
+    scheduler = Scheduler.for_owner(owner)
+
+    t1 = Task("Walk",  30, Priority.HIGH,   Category.WALK,    frequency="daily")
+    t2 = Task("Groom", 20, Priority.MEDIUM, Category.GROOMING, frequency="daily")
+
+    fitted, dropped = scheduler._fit_to_time([t1, t2], owner.available_minutes)
+    assert len(dropped) == 1
+    assert dropped[0].title == "Groom"
+
+
+def test_fit_to_time_backfill_readmits_small_task():
+    """The two-pass backfill should re-admit a short task dropped in the first pass."""
+    owner = make_owner(minutes=35)
+    pet = make_pet(owner)
+    scheduler = Scheduler.for_owner(owner)
+
+    # sorted order: Walk(30, HIGH), Groom(20, MEDIUM), Feed(5, LOW)
+    # First pass: Walk fits (30 used), Groom does not (would be 50), Feed does not (35 total)
+    # Backfill: 5 min remaining → Feed (5 min) should be readmitted
+    walk  = Task("Walk",  30, Priority.HIGH,   Category.WALK,    frequency="daily")
+    groom = Task("Groom", 20, Priority.MEDIUM, Category.GROOMING, frequency="daily")
+    feed  = Task("Feed",   5, Priority.LOW,    Category.FEEDING,  frequency="daily")
+
+    fitted, dropped = scheduler._fit_to_time([walk, groom, feed], owner.available_minutes)
+
+    fitted_titles = [t.title for t in fitted]
+    assert "Walk" in fitted_titles
+    assert "Feed" in fitted_titles   # backfilled into leftover 5 minutes
+    assert "Groom" in [t.title for t in dropped]
+
+
+def test_category_tiebreak_same_priority():
+    """Tasks with equal priority should be ordered by owner category preference."""
+    owner = make_owner(minutes=120)
+    pet = make_pet(owner)
+    scheduler = Scheduler.for_owner(owner)
+
+    # Default priority_order: WALK, FEEDING, MEDICATION, GROOMING, ENRICHMENT, AFFECTION
+    affection = Task("Cuddle", 15, Priority.MEDIUM, Category.AFFECTION,  frequency="daily")
+    walk      = Task("Walk",   30, Priority.MEDIUM, Category.WALK,       frequency="daily")
+    feeding   = Task("Feed",   10, Priority.MEDIUM, Category.FEEDING,    frequency="daily")
+
+    sorted_tasks = scheduler._sort_by_priority([affection, walk, feeding])
+    titles = [t.title for t in sorted_tasks]
+
+    assert titles.index("Walk")   < titles.index("Feed")
+    assert titles.index("Feed")   < titles.index("Cuddle")
+
+
+def test_generate_global_plan_returns_dropped_tasks():
+    """generate_global_plan's second return value should list tasks that exceeded the budget."""
+    owner = make_owner(minutes=20)
+    pet = make_pet(owner)
+
+    pet.add_task(Task("Walk",  30, Priority.HIGH, Category.WALK,    frequency="daily"))
+    pet.add_task(Task("Feed",  10, Priority.HIGH, Category.FEEDING, frequency="daily"))
+
+    scheduler = Scheduler.for_owner(owner)
+    plans, dropped = scheduler.generate_global_plan()
+
+    # 20 min budget: Feed(10) fits, Walk(30) cannot fit
+    assert isinstance(dropped, list)
+    assert any(t.title == "Walk" for t in dropped)
+
+
+# ── Step 9: Frequency Corner Cases ───────────────────────────────────────────
+
+def test_as_needed_task_is_never_due():
+    """A task with frequency='as_needed' should always return False from is_due()."""
+    task = Task("Nail trim", 15, Priority.LOW, frequency="as_needed")
+    assert task.is_due() is False
+
+
+def test_once_task_is_due_when_not_completed():
+    """A 'once' task that has not been completed should be due."""
+    task = Task("Vet visit", 60, Priority.HIGH, frequency="once")
+    assert task.is_due() is True
+
+
+def test_once_task_not_due_after_completion():
+    """A 'once' task is no longer due after mark_complete()."""
+    task = Task("Vet visit", 60, Priority.HIGH, frequency="once")
+    task.mark_complete()
+    assert task.is_due() is False
+
+
+def test_weekly_future_due_date_not_due():
+    """A weekly task whose due_date is in the future should not be due today."""
+    task = Task("Bath", 30, Priority.MEDIUM, frequency="weekly")
+    task.due_date = date.today() + timedelta(days=3)
+    assert task.is_due() is False
+
+
+def test_invalid_frequency_raises():
+    """Constructing a Task with an unrecognised frequency string should raise ValueError."""
+    try:
+        Task("Bad task", 10, Priority.LOW, frequency="hourly")
+        assert False, "Expected ValueError"
+    except ValueError:
+        pass
+
+
+# ── Step 10: Age Adjustments and get_next_task ────────────────────────────────
+
+def test_adjust_for_pet_caps_walk_for_puppy():
+    """Walks for puppies (< 12 months) should be capped at 20 minutes."""
+    owner = make_owner()
+    puppy = Pet("Pup", "Labrador", 6, "dog", owner)
+    scheduler = Scheduler.for_owner(owner)
+
+    task = Task("Walk", 45, Priority.HIGH, Category.WALK, frequency="daily")
+    adjusted = scheduler._adjust_for_pet([task], puppy)
+
+    assert adjusted[0].duration_minutes <= 20
+
+
+def test_adjust_for_pet_caps_walk_for_senior():
+    """Walks for senior pets (> 96 months) should be capped at 25 minutes."""
+    owner = make_owner()
+    senior = Pet("Elder", "Labrador", 100, "dog", owner)
+    scheduler = Scheduler.for_owner(owner)
+
+    task = Task("Walk", 60, Priority.MEDIUM, Category.WALK, frequency="daily")
+    adjusted = scheduler._adjust_for_pet([task], senior)
+
+    assert adjusted[0].duration_minutes <= 25
+
+
+def test_adjust_for_pet_promotes_meds_for_senior():
+    """Medication tasks for senior pets should be bumped to HIGH priority."""
+    owner = make_owner()
+    senior = Pet("Elder", "Labrador", 100, "dog", owner)
+    scheduler = Scheduler.for_owner(owner)
+
+    task = Task("Meds", 10, Priority.LOW, Category.MEDICATION, frequency="daily")
+    adjusted = scheduler._adjust_for_pet([task], senior)
+
+    assert adjusted[0].priority == Priority.HIGH
+
+
+def test_get_next_task_returns_highest_priority():
+    """get_next_task() should return the highest-priority pending due task."""
+    owner = make_owner()
+    pet = make_pet(owner)
+    pet.add_task(Task("Low task",  10, Priority.LOW,  Category.AFFECTION, frequency="daily"))
+    pet.add_task(Task("High task", 15, Priority.HIGH, Category.WALK,      frequency="daily"))
+    pet.add_task(Task("Med task",  10, Priority.MEDIUM, Category.FEEDING, frequency="daily"))
+
+    scheduler = Scheduler.for_owner(owner)
+    next_task = scheduler.get_next_task()
+
+    assert next_task is not None
+    assert next_task.title == "High task"
+
+
+def test_get_next_task_ignores_completed():
+    """get_next_task() should skip tasks that are already completed."""
+    owner = make_owner()
+    pet = make_pet(owner)
+    high = Task("Walk",  30, Priority.HIGH, Category.WALK,    frequency="daily")
+    low  = Task("Feed",  10, Priority.LOW,  Category.FEEDING, frequency="daily")
+    high.mark_complete()
+    pet.add_task(high)
+    pet.add_task(low)
+
+    scheduler = Scheduler.for_owner(owner)
+    next_task = scheduler.get_next_task()
+
+    assert next_task is not None
+    assert next_task.title == "Feed"
+
+
+def test_by_time_bucket_filter():
+    """by_time_bucket(MORNING) should return only items scheduled before noon."""
+    from datetime import time
+    from pawpal_system import by_time_bucket
+
+    morning_item = ScheduledItem(Task("Walk",  30, Priority.HIGH),  time(7, 0),  "")
+    evening_item = ScheduledItem(Task("Feed",  10, Priority.HIGH),  time(13, 0), "")
+    night_item   = ScheduledItem(Task("Meds",   5, Priority.HIGH),  time(19, 0), "")
+
+    result = apply_filters(
+        [morning_item, evening_item, night_item],
+        [by_time_bucket(TimeOfDay.MORNING)],
+    )
+    assert len(result) == 1
+    assert result[0].task.title == "Walk"
